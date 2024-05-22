@@ -15,9 +15,15 @@
 import torch
 import torch.multiprocessing as mp
 from datasets import load_dataset
+from omegaconf import open_dict
+from pytorch_lightning.trainer.trainer import Trainer
+from tqdm import tqdm
 
+from nemo.collections.nlp.models.language_modeling.megatron_gpt_model import MegatronGPTModel
+from nemo.collections.nlp.parts.nlp_overrides import NLPDDPStrategy
 from nemo.core.config import hydra_runner
 from nemo.export.quantize import Quantizer
+from nemo.utils.model_utils import load_config
 
 mp.set_start_method("spawn", force=True)
 
@@ -31,11 +37,11 @@ models supported as well as how to set up data and inference for calibration (wi
 Example usage:
 ```
 python examples/nlp/language_modeling/megatron_quantization.py \
-    model_file=llama2-7b-fp16.nemo \
-    model_save=llama2-7b-fp8.qnemo \
+    model.restore_from_path=llama2-7b-fp16.nemo \
     quantization.algorithm=fp8 \
     export.decoder_type=llama \
     export.inference_tensor_parallel=1
+    export.save_path=llama2-7b-fp8.qnemo \
 ```
 """
 
@@ -64,7 +70,18 @@ def main(cfg) -> None:
     if not torch.cuda.is_available():
         raise EnvironmentError("GPU is required for the inference.")
 
-    quantizer = Quantizer(cfg.quantization, cfg.inference, cfg.export, cfg.trainer)
+    # Overwrite model config with the one from the model checkpoint and apply quantization modifications
+    model_cfg = load_config(cfg.model.restore_from_path)
+    with open_dict(model_cfg):
+        for key, val in cfg.model.items():
+            model_cfg[key] = val
+    model_cfg = Quantizer.modify_model_config(model_cfg)
+
+    trainer = Trainer(strategy=NLPDDPStrategy(), **cfg.trainer)
+    model = MegatronGPTModel.restore_from(
+        restore_path=cfg.model.restore_from_path, override_config_path=model_cfg, trainer=trainer
+    )
+    model.freeze()
 
     # Quantization algorithm can be set to None. This is useful for baseline precision
     # accuracy validation. In this case only weights export step will be performed:
@@ -76,14 +93,14 @@ def main(cfg) -> None:
             cfg.inference.max_context_length,
         )
         dataloader = [data for data in dataloader]
-    else:
-        dataloader = None
 
-    model = quantizer.quantize(
-        cfg.model_file, dataloader, cfg.tensor_model_parallel_size, cfg.pipeline_model_parallel_size
-    )
+        def forward_loop(model):
+            for i, batch in enumerate(tqdm(dataloader, desc="Calibrating")):
+                model.predict_step(batch, i)
 
-    quantizer.export(model, cfg.model_save)
+        model = Quantizer.quantize(model, forward_loop, cfg.quantization, cfg.inference)
+
+    Quantizer.export(model, cfg.export)
 
 
 if __name__ == '__main__':
