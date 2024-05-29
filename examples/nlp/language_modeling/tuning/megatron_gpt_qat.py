@@ -78,7 +78,8 @@ def main(cfg) -> None:
     trainer.fit(model)
 
     # Export the quantized model for TensorRT-LLM inference
-    Quantizer.export(model, cfg.export)
+    if cfg.quantization.algorithm != "int4":
+        Quantizer.export(model, cfg.export)
 
 
 if __name__ == '__main__':
