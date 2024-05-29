@@ -376,7 +376,7 @@ jobs:
         - uses: "NVIDIA/NeMo/.github/actions/cancel-workflow@main"
           if: "failure()"
 
-  L2_PTQ_Llama2_FP8:
+  L2_QAT_Llama2_FP8:
      needs: [cicd-test-container-setup]
      runs-on: self-hosted-azure
      timeout-minutes: 10
@@ -394,18 +394,24 @@ jobs:
          - name: Checkout repository
            uses: actions/checkout@v4
          - run: |
-             python examples/nlp/language_modeling/megatron_quantization.py \
-             model_file=/home/TestData/nlp/megatron_llama/llama_ci.nemo \
-             tensor_model_parallel_size=2 \
-             trainer.devices=2 \
-             quantization.calib_dataset=/home/TestData/nlp/test_quantization/test.json \
-             quantization.algorithm=fp8 \
-             quantization.num_calib_size=8 \
-             inference.batch_size=2 \
-             export.inference_tensor_parallel=2 \
-             model_save=/home/TestData/nlp/megatron_llama/ci_fp8.qnemo
+            python examples/nlp/language_modeling/tuning/megatron_gpt_qat.py \
+            quantization.algorithm=fp8 \
+            quantization.num_calib_size=8 \
+            trainer.devices=1 \
+            trainer.num_nodes=1 \
+            trainer.max_steps=4 \
+            trainer.val_check_interval=4 \
+            +trainer.limit_val_batches=2 \
+            exp_manager.explicit_log_dir=llama2_qat_results \
+            model.restore_from_path=/home/TestData/nlp/megatron_llama/llama_ci.nemo \
+            model.tensor_model_parallel_size=1 \
+            model.pipeline_model_parallel_size=1 \
+            model.global_batch_size=2 \
+            model.data.train_ds.file_names=[/home/TestData/nlp/megatron_sft/quarel.jsonl] \
+            model.data.train_ds.concat_sampling_probabilities=[1.0]
+            model.data.validation_ds.file_names=[/home/TestData/nlp/megatron_sft/quarel.jsonl] \
 
-             rm -rf /home/TestData/nlp/megatron_llama/ci_fp8.qnemo
+            rm -rf llama2_qat_results
          - uses: "NVIDIA/NeMo/.github/actions/cancel-workflow@main"
            if: "failure()"
 
