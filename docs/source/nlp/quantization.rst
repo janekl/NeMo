@@ -140,6 +140,8 @@ During QAT, the quantization scaling factors computed during PTQ are frozen and 
 While QAT requires much more compute resources than PTQ, it is highly effective in recovering model quality.
 To perform QAT on a calibrated model from PTQ, you need to further fine-tune the model on a downstream task using a small dataset before exporting to TensorRT-LLM.
 You can reuse your training pipeline for QAT.
+As a rule of thumb, we recommend QAT for 1-10% original training duration and a small learning rate, e.g. 1e-5 for Adam optimizer.
+If you are doing QAT on an SFT model where learning rates and finetuning dataset size are already small, you can continue using the same SFT learning rate and dataset size as a starting point for QAT.
 Since QAT is done after PTQ, the supported model families are the same as for PTQ.
 
 
