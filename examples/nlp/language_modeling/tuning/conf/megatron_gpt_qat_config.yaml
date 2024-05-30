@@ -30,7 +30,7 @@ exp_manager:
     save_top_k: 1
     mode: min
     save_nemo_on_train_end: True
-    filename: '${name}--{${exp_manager.checkpoint_callback_params.monitor}:.3f}-{step}-{consumed_samples}'
+    filename: "${name}--{${exp_manager.checkpoint_callback_params.monitor}:.3f}-{step}-{consumed_samples}"
     model_parallel_size: ${model.tensor_model_parallel_size}
     always_save_nemo: False
     save_best_model: False
@@ -54,16 +54,16 @@ model:
   resume_from_checkpoint: null # The path to a checkpoint file to continue the training, restores the whole state including the epoch, step, LR schedulers, apex, etc.
   save_nemo_on_validation_end: False # Saves an inference ready .nemo file every time a checkpoint is saved during training.
   sync_batch_comm: False
-  megatron_amp_O2: False
+  megatron_amp_O2: True
 
   ## Sequence Parallelism
   # Makes tensor parallelism more memory efficient for LLMs (20B+) by parallelizing layer norms and dropout sequentially
   # See Reducing Activation Recomputation in Large Transformer Models: https://arxiv.org/abs/2205.05198 for more details.
-  sequence_parallel: False
+  sequence_parallel: True
 
   ## Activation Checkpoint
-  activations_checkpoint_granularity: null # 'selective' or 'full'
-  activations_checkpoint_method: null # 'uniform', 'block', not used with 'selective'
+  activations_checkpoint_granularity: selective # 'selective' or 'full'
+  activations_checkpoint_method: uniform # 'uniform', 'block', not used with 'selective'
   # 'uniform' divides the total number of transformer layers and checkpoints the input activation
   # of each chunk at the specified granularity
   # 'block' checkpoints the specified number of layers per pipeline stage at the specified granularity
@@ -78,13 +78,13 @@ model:
 
   # FSDP
   fsdp: False # Enable training with torch FSDP.
-  fsdp_sharding_strategy: 'full' # Method to shard model states. Available options are 'full', 'hybrid', and 'grad'.
-  fsdp_grad_reduce_dtype: 'fp32' # Gradient reduction data type.
+  fsdp_sharding_strategy: "full" # Method to shard model states. Available options are 'full', 'hybrid', and 'grad'.
+  fsdp_grad_reduce_dtype: "fp32" # Gradient reduction data type.
   fsdp_sharded_checkpoint: False # Store and load FSDP shared checkpoint.
   fsdp_use_orig_params: False # Set to True to use FSDP for specific peft scheme.
 
   peft:
-    peft_scheme: 'none' # Should be none for QAT as we are doing SFT on all parameters
+    peft_scheme: "none" # Should be none for QAT as we are doing SFT on all parameters
 
   data:
     train_ds:
@@ -111,14 +111,14 @@ model:
       #   - 0.25
       #   - 0.25
       concat_sampling_probabilities: null # When providing a list of datasets, this arg defines the sampling probabilities from each dataset when strategy='random'
-      label_key: 'output'
+      label_key: "output"
       add_eos: True
       add_sep: False
       add_bos: False
       truncation_field: "input" # # Can be multiple keys separated with ',' Options: keys in prompt_template
       index_mapping_dir: null # Path to a directory to write index mapping files.
       prompt_template: "{input} {output}" # fstring to use for assistant prompt. Example: "Q: {input}\nA: {output}"
-      truncation_method: 'right' # Truncation from which position, Options: ['left', 'right'] 
+      truncation_method: "right" # Truncation from which position, Options: ['left', 'right']
     validation_ds:
       file_names: ??? # Path to a list of JSONL files corresponding to the source data. Data format is identical to train_ds.
       names: null # Names of the corresponding datasets used to log metrics.
@@ -141,7 +141,7 @@ model:
       index_mapping_dir: null # Path to a directory to write index mapping files.
       prompt_template: ${model.data.train_ds.prompt_template} # fstring to use for assistant prompt. Example: "Q: {input}\nA: {output}"
       tokens_to_generate: 32 # decide how many tokens we want to generate to evaluate performance with string metrics
-      truncation_method: 'right' # Truncation from which position, Options: ['left', 'right']
+      truncation_method: "right" # Truncation from which position, Options: ['left', 'right']
       metric:
         name: "loss" # Name of the evaluation metric to use. Options: ['exact_string_match', 'loss']
         average: null # Average the metric over the dataset. Options: ['macro', 'micro']. Works only for 'F1', 'accuracy' etc. Refer to torchmetrics for metrics where this is supported.
@@ -168,7 +168,7 @@ model:
       index_mapping_dir: null # Path to a directory to write index mapping files.
       prompt_template: ${model.data.train_ds.prompt_template}
       tokens_to_generate: 32 # decide how many tokens we want to generate to evaluate performance with string metrics
-      truncation_method: 'right' # Truncation from which position, Options: ['left', 'right']
+      truncation_method: "right" # Truncation from which position, Options: ['left', 'right']
       metric:
         name: "loss" # Name of the evaluation metric to use. Options: ['exact_string_match', 'loss']
         average: null # Average the metric over the dataset. Options: ['macro', 'micro']. Works only for 'F1', 'accuracy' etc. Refer to torchmetrics for metrics where this is supported.
@@ -177,10 +177,10 @@ model:
   optim:
     name: distributed_fused_adam
     lr: 5e-6
-    weight_decay: 0.01 
-    betas: 
-    - 0.9
-    - 0.98
+    weight_decay: 0.01
+    betas:
+      - 0.9
+      - 0.98
     sched:
       name: CosineAnnealing
       warmup_steps: 50
