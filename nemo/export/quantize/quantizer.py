@@ -80,8 +80,64 @@ class Quantizer:
     for TensorRT-LLM deployment. This is useful to getting baseline results for a full-precision model.
     """
 
+    def __init__(
+            self,
+            quantization_config: Optional[DictConfig],
+            inference_config: Optional[DictConfig],
+            export_config: Optional[DictConfig],
+    ):
+        if not HAVE_MODELOPT:
+            raise RuntimeError("nvidia-modelopt is needed to use Quantizer") from HAVE_MODELOPT_ERROR
+
+        self.quantization_config = None
+        self.inference_config = None
+        self.export_config = None
+
+        self._set_quantization_config(quantization_config)
+        self._set_inference_config(inference_config)
+        self._set_export_config(export_config)
+
+    def _set_quantization_config(self, quantization_config):
+        self.quantization_config = quantization_config
+        if quantization_config is None or quantization_config.algorithm is None:
+            self.quant_cfg = None
+            return
+        assert quantization_config.algorithm in QUANT_CFG_CHOICES
+
+        quant_cfg = QUANT_CFG_CHOICES[quantization_config.algorithm]
+
+        if "awq" in quantization_config.algorithm:
+            weight_quantizer = quant_cfg["quant_cfg"]["*weight_quantizer"]
+            if isinstance(weight_quantizer, list):
+                weight_quantizer = weight_quantizer[0]
+            weight_quantizer["block_sizes"][-1] = quantization_config.awq_block_size
+
+        # Always turn on FP8 kv cache to save memory footprint.
+        # For int8_sq, we use int8 kv cache.
+        # TODO: Investigate why enabling FP8 kv cache will cause accuracy regressions for Nemotron.
+        enable_quant_kv_cache = (
+            "int8" not in quantization_config.algorithm and quantization_config.decoder_type != "gptnext"
+        )
+        print(f'{"Enable" if enable_quant_kv_cache else "Disable"} KV cache quantization')  # TODO: logging.info
+        quant_cfg["quant_cfg"]["*output_quantizer"] = {
+            "num_bits": 8 if quantization_config.algorithm == "int8_sq" else (4, 3),
+            "axis": None,
+            "enable": enable_quant_kv_cache,
+        }
+
+        self.quant_cfg = quant_cfg
+
+    def _set_inference_config(self, inference_config):
+        if inference_config is not None:
+            self.inference_config = inference_config
+
+    def _set_export_config(self, export_config):
+        if export_config is not None:
+            assert export_config.dtype in SUPPORTED_DTYPE
+            self.export_config = export_config
+
     @staticmethod
-    def _setup(model: MegatronGPTModel, inference_config: Optional[DictConfig] = None):
+    def _setup(model: MegatronGPTModel):
         """Setup model for quantization."""
         try:
             model.model.module.language_model.encoder.activations_checkpoint_method = None
@@ -100,11 +156,8 @@ class Quantizer:
         set_data_parallel_group(mpu.get_data_parallel_group())
         set_tensor_parallel_group(mpu.get_tensor_model_parallel_group())
 
-        if inference_config is not None:
-            model.set_inference_config(OmegaConf.to_container(inference_config))
-
     @staticmethod
-    def modify_model_config(model_cfg: DictConfig) -> DictConfig:
+    def modify_model_config(model_cfg: DictConfig, model_config_overrides: Optional[DictConfig] = None) -> DictConfig:
         """Modify model config for quantization."""
         with open_dict(model_cfg):
             model_cfg.activations_checkpoint_method = None
@@ -116,6 +169,10 @@ class Quantizer:
             # layer implementation from megatron/core/transformer/dot_product_attention.py to be functional.
             model_cfg.name = "modelopt"
             model_cfg.apply_rope_fusion = False
+
+        # TODO: can be moved also here:
+        if model_config_overrides is not None:
+            model_cfg.update(model_config_overrides)
 
         return model_cfg
 
@@ -137,11 +194,25 @@ class Quantizer:
 
         logging.info(f'Example NeMo output before export: {response["sentences"]}"')
 
-    @staticmethod
+    def _postprocess(self, model):
+        if self.quantization_config.decoder_type == "gptnext":
+            # We found squared_relu may have an under-calibration problem.
+            # Clamp the scaling_factor with a min threshold to avoid under-calibration.
+            maxbound = 0
+            if self.quantization_config.algorithm == "fp8":
+                maxbound = 448
+            elif self.quantization_config.algorithm == "int8_sq":
+                maxbound = 127
+            model = mtq.postprocess_amax(
+                model, "*input_quantizer", lambda amax: torch.clamp(amax, min=0.01 * maxbound)
+            )
+        return model
+
     def quantize(
+        self,
         model: MegatronGPTModel,
         forward_loop: Callable[[MegatronGPTModel], None],
-        quantization_config: DictConfig,
+        quantization_config: Optional[DictConfig] = None,
         inference_config: Optional[DictConfig] = None,
     ):
         """Quantize model checkpoint using given dataloader.
@@ -151,56 +222,31 @@ class Quantizer:
             - decoder_type: str
             - awq_block_size: int (only for awq algorithms)
         """
-        if not HAVE_MODELOPT:
-            raise RuntimeError("nvidia-modelopt is needed to use Quantizer") from HAVE_MODELOPT_ERROR
 
-        Quantizer._setup(model, inference_config)
+        self._setup(model, inference_config)
 
-        algorithm = quantization_config.algorithm
-        assert algorithm in QUANT_CFG_CHOICES
-        quant_cfg = QUANT_CFG_CHOICES[algorithm]
-        decoder_type = quantization_config.decoder_type
+        self._set_quantization_config(quantization_config)
 
-        logging.info(f"Quantizing model to {algorithm}...")
+        self._set_inference_config(inference_config)
 
-        if "awq" in algorithm:
-            weight_quantizer = quant_cfg["quant_cfg"]["*weight_quantizer"]
-            if isinstance(weight_quantizer, list):
-                weight_quantizer = weight_quantizer[0]
-            weight_quantizer["block_sizes"][-1] = quantization_config.awq_block_size
+        assert self.inference_config is not None, "..."
 
-        # Always turn on FP8 kv cache to save memory footprint.
-        # For int8_sq, we use int8 kv cache.
-        # TODO: Investigate why enabling FP8 kv cache will cause accuracy regressions for Nemotron.
-        enable_quant_kv_cache = "int8" not in algorithm and decoder_type != "gptnext"
-        logging.info(f'{"Enabled" if enable_quant_kv_cache else "Disabled"} KV cache quantization')
-        quant_cfg["quant_cfg"]["*output_quantizer"] = {
-            "num_bits": 8 if algorithm == "int8_sq" else (4, 3),
-            "axis": None,
-            "enable": enable_quant_kv_cache,
-        }
+        assert self.quant_cfg is not None, "..."
 
-        model = mtq.quantize(model, quant_cfg, forward_loop)
+        model._set_inference_config(OmegaConf.to_container(self.inference_config))
 
-        if decoder_type == "gptnext":
-            # We found squared_relu may have an under-calibration problem.
-            # Clamp the scaling_factor with a min threshold to avoid under-calibration.
-            maxbound = 0
-            if algorithm == "fp8":
-                maxbound = 448
-            elif algorithm == "int8_sq":
-                maxbound = 127
-            model = mtq.postprocess_amax(
-                model, "*input_quantizer", lambda amax: torch.clamp(amax, min=0.01 * maxbound)
-            )
+        logging.info(f"Quantizing model to {self.quantization_config.algorithm}...")
+
+        model = mtq.quantize(model, self.quant_cfg, forward_loop)
+
+        model = self._postprocess(model)
 
         if dist.get_rank() == 0:
             mtq.print_quant_summary(model)
 
         return model
 
-    @staticmethod
-    def export(model: MegatronGPTModel, export_config: DictConfig):
+    def export(self, model: MegatronGPTModel, export_config: Optional[DictConfig] = None):
         """Export model to '.qnemo' format for TensorRT-LLM engine build.
 
         Expected keys in `export_config`:
@@ -210,12 +256,12 @@ class Quantizer:
             - inference_pipeline_parallel: int
             - save_path: str
         """
-        if not HAVE_MODELOPT:
-            raise RuntimeError("nvidia-modelopt is needed to use Quantizer") from HAVE_MODELOPT_ERROR
 
-        assert export_config.dtype in SUPPORTED_DTYPE
+        self._set_export_config(export_config)
 
-        torch_dtype = torch_dtype_from_precision(export_config.dtype)
+        assert self.export_config is not None, "..."
+
+        torch_dtype = torch_dtype_from_precision(export_config.dtype)  # TODO:
 
         Quantizer._sample_output(model)
 
@@ -224,7 +270,7 @@ class Quantizer:
 
         # Setup model export handling: temporary directory for
         # '.qnemo' tarball or directly write to export_config.save_path
-        save_qnemo = export_config.save_path.endswith(".qnemo")
+        save_qnemo = self.export_config.save_path.endswith(".qnemo")  # TODO [later]: consider a flag like `export_config.compress`
         if save_qnemo:
             export_handler = temporary_directory()
         else:
@@ -233,20 +279,19 @@ class Quantizer:
         with export_handler as export_dir:
             export_tensorrt_llm_checkpoint(
                 model=model,
-                decoder_type=export_config.decoder_type,
+                decoder_type=self.export_config.decoder_type,
                 dtype=torch_dtype,
                 export_dir=export_dir,
-                inference_tensor_parallel=export_config.inference_tensor_parallel,
-                inference_pipeline_parallel=export_config.inference_pipeline_parallel,
-                use_nfs_workspace=export_config.inference_pipeline_parallel == 1
-                and model.cfg.pipeline_model_parallel_size > 1,
+                inference_tensor_parallel=self.export_config.inference_tensor_parallel,
+                inference_pipeline_parallel=self.export_config.inference_pipeline_parallel,
+                use_nfs_workspace=model.trainer.num_nodes > 1,  # TODO: is that OK?
             )
             dist.barrier()  # Wait until all ranks complete export_model_config step
             logging.info(
-                f"Exporting quantized weights, model artifacts, and tokenizer config to {export_config.save_path}..."
+                f"Exporting quantized weights, model artifacts, and tokenizer config to {self.export_config.save_path}..."
             )
             if dist.get_rank() == 0:
                 save_artifacts(model, export_dir)
                 if save_qnemo:
-                    with tarfile.open(export_config.save_path, "w:gz") as tar:
+                    with tarfile.open(self.export_config.save_path, "w:gz") as tar:
                         tar.add(export_dir, arcname="./")

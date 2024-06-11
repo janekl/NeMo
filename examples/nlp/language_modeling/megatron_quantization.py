@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Let's rename this to megatron_gpt_quantization.py (same for the yaml config)
+# for consistency with https://github.com/NVIDIA/NeMo/pull/9326 and in general
+
 import torch
 import torch.multiprocessing as mp
 from datasets import load_dataset
-from omegaconf import open_dict
 from pytorch_lightning.trainer.trainer import Trainer
 from tqdm import tqdm
 
@@ -36,7 +38,7 @@ models supported as well as how to set up data and inference for calibration (wi
 
 Example usage:
 ```
-python examples/nlp/language_modeling/megatron_quantization.py \
+python examples/nlp/language_modeling/megatron_gpt_quantization.py \
     model.restore_from_path=llama2-7b-fp16.nemo \
     quantization.algorithm=fp8 \
     export.decoder_type=llama \
@@ -70,12 +72,12 @@ def main(cfg) -> None:
     if not torch.cuda.is_available():
         raise EnvironmentError("GPU is required for the inference.")
 
+    quantizer = Quantizer(cfg.quantization, cfg.export)
+
     # Overwrite model config with the one from the model checkpoint and apply quantization modifications
     model_cfg = load_config(cfg.model.restore_from_path)
-    with open_dict(model_cfg):
-        for key, val in cfg.model.items():
-            model_cfg[key] = val
-    model_cfg = Quantizer.modify_model_config(model_cfg)
+
+    model_cfg = quantizer.modify_model_config(model_cfg, cfg.model)
 
     trainer = Trainer(strategy=NLPDDPStrategy(), **cfg.trainer)
     model = MegatronGPTModel.restore_from(
@@ -98,9 +100,9 @@ def main(cfg) -> None:
             for i, batch in enumerate(tqdm(dataloader, desc="Calibrating")):
                 model.predict_step(batch, i)
 
-        model = Quantizer.quantize(model, forward_loop, cfg.quantization, cfg.inference)
+        model = quantizer.quantize(model, forward_loop, cfg.quantization, cfg.inference)
 
-    Quantizer.export(model, cfg.export)
+    quantizer.export(model, cfg.export)
 
 
 if __name__ == '__main__':
