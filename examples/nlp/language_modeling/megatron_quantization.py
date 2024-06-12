@@ -72,7 +72,7 @@ def main(cfg) -> None:
     if not torch.cuda.is_available():
         raise EnvironmentError("GPU is required for the inference.")
 
-    quantizer = Quantizer(cfg.quantization, cfg.export)
+    quantizer = Quantizer(cfg.quantization, cfg.inference, cfg.export)
 
     # Overwrite model config with the one from the model checkpoint and apply quantization modifications
     model_cfg = load_config(cfg.model.restore_from_path)
@@ -100,7 +100,7 @@ def main(cfg) -> None:
             for i, batch in enumerate(tqdm(dataloader, desc="Calibrating")):
                 model.predict_step(batch, i)
 
-        model = quantizer.quantize(model, forward_loop, cfg.quantization, cfg.inference)
+        model = quantizer.quantize(model, forward_loop)
 
     quantizer.export(model, cfg.export)
 
